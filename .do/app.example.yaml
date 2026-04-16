@@ -1,0 +1,22 @@
+name: ltx-reins-notifier
+region: nyc
+workers:
+  - name: notifier
+    github:
+      repo: jasonkerr7/ltx_reins
+      branch: main
+      deploy_on_push: true
+    source_dir: /
+    build_command: npm ci --omit=dev
+    run_command: node scripts/notifier.js
+    instance_size_slug: apps-s-1vcpu-0.5gb
+    instance_count: 1
+    envs:
+      - key: TG_BOT_TOKEN
+        scope: RUN_TIME
+        type: SECRET
+        value: REPLACE_ME
+      - key: TG_CHAT_ID
+        scope: RUN_TIME
+        type: SECRET
+        value: REPLACE_ME

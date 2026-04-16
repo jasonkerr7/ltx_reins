@@ -10,3 +10,6 @@ scripts/notifier_state.json
 
 # Local Claude settings (not shared)
 .claude/settings.local.json
+
+# DigitalOcean App Platform spec (contains secrets — never commit)
+.do/app.yaml
