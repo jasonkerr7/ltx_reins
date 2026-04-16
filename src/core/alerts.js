@@ -1,75 +1,139 @@
 /**
  * Core alert logic.
+ *
+ * Alert creation uses the pricealerts.tradingview.com REST API directly
+ * (discovered via live network sniffing). The endpoint accepts a JSON body
+ * wrapped in { payload: {...} } and uses cookie auth via credentials:'include'.
+ * Content-Type is omitted so the browser defaults to text/plain (CORS-safe).
  */
-import { evaluate, evaluateAsync, getClient } from '../connection.js';
+import { evaluate, evaluateAsync } from '../connection.js';
+
+// Map user-facing condition names to TradingView's internal condition types.
+// TV's conditions array expects an object per condition; for a simple price
+// level, `series` is [{type:'barset'}, {type:'value', value: <price>}].
+function buildConditions(condition, price, resolution) {
+  const priceNum = Number(price);
+  if (!Number.isFinite(priceNum)) throw new Error('price must be a finite number');
+
+  const series = [{ type: 'barset' }, { type: 'value', value: priceNum }];
+  const c = String(condition || 'crossing').toLowerCase();
+
+  // crossing / cross / crosses → "cross" with cross_interval:true (crosses either direction)
+  if (/^cross/.test(c)) {
+    return [{ type: 'cross', frequency: 'on_first_fire', series, resolution }];
+  }
+  // greater_than / greater / above / >
+  if (/^(greater|above|>)/.test(c)) {
+    return [{ type: 'greater', frequency: 'on_first_fire', series, resolution }];
+  }
+  // less_than / less / below / <
+  if (/^(less|below|<)/.test(c)) {
+    return [{ type: 'less', frequency: 'on_first_fire', series, resolution }];
+  }
+  // crossing_up / cross_up → cross with cross_interval:false + direction
+  if (/cross.*up|up.*cross/.test(c)) {
+    return [{ type: 'cross-up', frequency: 'on_first_fire', series, resolution }];
+  }
+  if (/cross.*down|down.*cross/.test(c)) {
+    return [{ type: 'cross-down', frequency: 'on_first_fire', series, resolution }];
+  }
+  // entering / inside
+  if (/^(enter|inside)/.test(c)) {
+    return [{ type: 'enter', frequency: 'on_first_fire', series, resolution }];
+  }
+  // exiting / outside
+  if (/^(exit|outside)/.test(c)) {
+    return [{ type: 'exit', frequency: 'on_first_fire', series, resolution }];
+  }
+  // Default: crossing
+  return [{ type: 'cross', frequency: 'on_first_fire', series, resolution }];
+}
 
 export async function create({ condition, price, message }) {
-  const opened = await evaluate(`
+  if (price === undefined || price === null) throw new Error('price is required');
+
+  // Pull current chart symbol + resolution so the alert is tied to what the user sees.
+  const chartInfo = await evaluate(`
     (function() {
-      var btn = document.querySelector('[aria-label="Create Alert"]')
-        || document.querySelector('[data-name="alerts"]');
-      if (btn) { btn.click(); return true; }
-      return false;
+      try {
+        var chart = window.TradingViewApi && window.TradingViewApi._activeChartWidgetWV && window.TradingViewApi._activeChartWidgetWV.value();
+        if (!chart) return { error: 'no active chart' };
+        return { symbol: chart.symbol(), resolution: chart.resolution() };
+      } catch(e) { return { error: e.message }; }
     })()
   `);
 
-  if (!opened) {
-    const client = await getClient();
-    await client.Input.dispatchKeyEvent({ type: 'keyDown', modifiers: 1, key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65 });
-    await client.Input.dispatchKeyEvent({ type: 'keyUp', key: 'a', code: 'KeyA' });
+  if (!chartInfo || chartInfo.error) {
+    throw new Error('Could not read chart state: ' + (chartInfo?.error || 'unknown'));
   }
 
-  await new Promise(r => setTimeout(r, 1000));
+  const symbol = chartInfo.symbol;
+  const resolution = chartInfo.resolution || '1';
+  // TradingView's symbol format in alerts is `=JSON(symbolinfo)` — pass minimal,
+  // the server fills in adjustment/currency-id/etc. automatically.
+  const symbolParam = '=' + JSON.stringify({ symbol, session: 'regular' });
 
-  const priceSet = await evaluate(`
-    (function() {
-      var inputs = document.querySelectorAll('[class*="alert"] input[type="text"], [class*="alert"] input[type="number"]');
-      for (var i = 0; i < inputs.length; i++) {
-        var label = inputs[i].closest('[class*="row"]')?.querySelector('[class*="label"]');
-        if (label && /value|price/i.test(label.textContent)) {
-          var nativeSet = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
-          nativeSet.call(inputs[i], '${price}');
-          inputs[i].dispatchEvent(new Event('input', { bubbles: true }));
-          inputs[i].dispatchEvent(new Event('change', { bubbles: true }));
-          return true;
-        }
-      }
-      if (inputs.length > 0) {
-        var nativeSet = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
-        nativeSet.call(inputs[0], '${price}');
-        inputs[0].dispatchEvent(new Event('input', { bubbles: true }));
-        return true;
-      }
-      return false;
-    })()
+  const conditions = buildConditions(condition, price, resolution);
+  const defaultMessage = message || `${symbol} ${condition || 'crossing'} ${price}`;
+
+  // Expiration: 30 days out (matches TV's default).
+  const expiration = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
+
+  const payload = {
+    symbol: symbolParam,
+    resolution,
+    message: defaultMessage,
+    sound_file: null,
+    sound_duration: 0,
+    popup: true,
+    expiration,
+    auto_deactivate: true,
+    email: false,
+    sms_over_email: false,
+    mobile_push: true,
+    web_hook: null,
+    name: null,
+    conditions,
+    active: true,
+  };
+
+  // POST to the TV REST API. Note: no Content-Type header → browser uses text/plain
+  // which is CORS-safe (same-origin cookie auth works, no preflight).
+  const result = await evaluateAsync(`
+    fetch('https://pricealerts.tradingview.com/create_alert', {
+      method: 'POST',
+      credentials: 'include',
+      body: ${JSON.stringify(JSON.stringify({ payload }))}
+    })
+    .then(function(r) { return r.json().then(function(data) { return { status: r.status, data: data }; }); })
+    .catch(function(e) { return { error: e.message }; })
   `);
 
-  if (message) {
-    await evaluate(`
-      (function() {
-        var textarea = document.querySelector('[class*="alert"] textarea')
-          || document.querySelector('textarea[placeholder*="message"]');
-        if (textarea) {
-          var nativeSet = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set;
-          nativeSet.call(textarea, ${JSON.stringify(message)});
-          textarea.dispatchEvent(new Event('input', { bubbles: true }));
-        }
-      })()
-    `);
+  if (!result || result.error) {
+    return { success: false, error: result?.error || 'no response', source: 'rest_api' };
   }
 
-  await new Promise(r => setTimeout(r, 500));
-  const created = await evaluate(`
-    (function() {
-      var btns = document.querySelectorAll('button[data-name="submit"], button');
-      for (var i = 0; i < btns.length; i++) {
-        if (/^create$/i.test(btns[i].textContent.trim())) { btns[i].click(); return true; }
-      }
-      return false;
-    })()
-  `);
+  if (result.data && result.data.s === 'ok') {
+    const created = result.data.r || {};
+    return {
+      success: true,
+      alert_id: created.alert_id,
+      symbol,
+      resolution,
+      price: Number(price),
+      condition: conditions[0].type,
+      message: defaultMessage,
+      source: 'rest_api',
+    };
+  }
 
-  return { success: !!created, price, condition, message: message || '(none)', price_set: !!priceSet, source: 'dom_fallback' };
+  return {
+    success: false,
+    error: result.data?.errmsg || result.data?.err?.code || 'create failed',
+    status: result.status,
+    response: result.data,
+    source: 'rest_api',
+  };
 }
 
 export async function list() {

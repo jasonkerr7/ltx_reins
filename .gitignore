@@ -4,3 +4,9 @@ scripts/current.pine
 temp_*
 *.log
 discovery-log.json
+
+# Notifier runtime state (ephemeral — recreated on start)
+scripts/notifier_state.json
+
+# Local Claude settings (not shared)
+.claude/settings.local.json
