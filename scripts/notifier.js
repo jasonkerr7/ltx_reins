@@ -1,22 +1,20 @@
 #!/usr/bin/env node
 /**
- * Smart Telegram alert notifier — 4H close with indicator & structure confirmation.
+ * Smart Telegram alert notifier — 4H close with EMA-channel + RSI + structure confirmation.
  *
  * Fires when ALL of:
- *   1. A new 4H bar has closed since last poll,
- *   2. The 4H close crossed the alert's level in the configured direction,
- *   3. Per-market indicator confirmation matches the trade side (long/short),
- *   4. Prior swing high (shorts) / swing low (longs) has not been broken.
+ *   1. A new 4H bar has closed since last poll
+ *   2. The 4H close crossed the alert's level in the configured direction
+ *   3. Per-alert `confirm` rule matches (RSI band + channel position)
+ *   4. Prior swing high (shorts) / swing low (longs) has not been broken
  *
- * Side "warning" bypasses checks (2) fires only, (3) and (4) are skipped — used for
- * invalidation-style pings.
+ * `side: "warning"` bypasses (3) and (4) — used for invalidation pings.
  *
- * Data: Yahoo Finance chart API (public, no auth). Indicators computed client-side.
+ * EMA-channel = EMA(20) of highs (upper band) and EMA(20) of lows (lower band),
+ * matching the user's chart indicator. Confirm rule `channel: "upper" | "lower"`
+ * requires close to be above upper band / below lower band respectively.
  *
- * Caveat: state (lastClose, fired) is file-based and resets on DO App Platform
- * redeploy. On boot, lastClose is seeded from the current latest completed bar so
- * we don't retroactively re-fire old crosses. `fired` may re-fire an alert once
- * across a redeploy if its conditions happen to cross again.
+ * Data: Yahoo Finance chart API. Indicators computed client-side.
  */
 
 import fs from 'node:fs';
@@ -30,6 +28,8 @@ const STATE_FILE  = path.join(__dirname, 'notifier_state.json');
 const POLL_SECONDS = 60;
 const TF = '4h';
 const TF_MS = 4 * 60 * 60 * 1000;
+const EMA_LEN = 20;
+const RSI_LEN = 14;
 const SWING_LOOKBACK = 10;
 
 const BOT_TOKEN = process.env.TG_BOT_TOKEN;
@@ -41,31 +41,15 @@ if (!BOT_TOKEN || !CHAT_ID) {
 }
 
 const MARKETS = {
-  BTC: {
-    yahoo: 'BTC-USD', display: 'BTC/USD', decimals: 0,
-    long_confirm:  { rsi_min: 50, ema_side: 'above' },
-    short_confirm: { rsi_max: 50, ema_side: 'below' },
-  },
-  GOLD: {
-    yahoo: 'GC=F', display: 'Gold (XAU)', decimals: 2,
-    long_confirm:  { rsi_min: 45, bb_touch: 'lower' },
-    short_confirm: { rsi_max: 55, bb_touch: 'upper' },
-  },
-  GBPUSD: {
-    yahoo: 'GBPUSD=X', display: 'GBP/USD', decimals: 5,
-    long_confirm:  { rsi_min: 50, ema_side: 'above' },
-    short_confirm: { rsi_max: 50, ema_side: 'below' },
-  },
-  EURUSD: {
-    yahoo: 'EURUSD=X', display: 'EUR/USD', decimals: 5,
-    long_confirm:  { rsi_min: 50, ema_side: 'above' },
-    short_confirm: { rsi_max: 50, ema_side: 'below' },
-  },
+  BTC:    { yahoo: 'BTC-USD',  display: 'BTC/USD',    decimals: 0 },
+  GOLD:   { yahoo: 'GC=F',     display: 'Gold (XAU)', decimals: 2 },
+  GBPUSD: { yahoo: 'GBPUSD=X', display: 'GBP/USD',    decimals: 5 },
+  EURUSD: { yahoo: 'EURUSD=X', display: 'EUR/USD',    decimals: 5 },
 };
 
 async function fetchBars(yahooSymbol) {
   const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(yahooSymbol)}?interval=${TF}&range=60d`;
-  const r = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0 (compatible; alert-notifier/2.0)' } });
+  const r = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0 (compatible; alert-notifier/3.0)' } });
   if (!r.ok) throw new Error(`Yahoo ${yahooSymbol} HTTP ${r.status}`);
   const d = await r.json();
   const result = d?.chart?.result?.[0];
@@ -118,22 +102,6 @@ function rsi(closes, n) {
   return out;
 }
 
-function bollinger(closes, n, mult) {
-  const mid = new Array(closes.length);
-  const upper = new Array(closes.length);
-  const lower = new Array(closes.length);
-  for (let i = n - 1; i < closes.length; i++) {
-    const window = closes.slice(i - n + 1, i + 1);
-    const m = window.reduce((a, b) => a + b, 0) / n;
-    const variance = window.reduce((a, b) => a + (b - m) ** 2, 0) / n;
-    const sd = Math.sqrt(variance);
-    mid[i] = m;
-    upper[i] = m + mult * sd;
-    lower[i] = m - mult * sd;
-  }
-  return { mid, upper, lower };
-}
-
 function latestCompletedBarIndex(bars) {
   const now = Date.now();
   for (let i = bars.length - 1; i >= 0; i--) {
@@ -142,26 +110,23 @@ function latestCompletedBarIndex(bars) {
   return -1;
 }
 
-function checkConfirm(confirm, { rsi: rsiVal, close, ema21, bb }, decimals) {
+function checkConfirm(confirm, { rsi: rsiVal, close, emaHigh, emaLow }, decimals) {
+  if (!confirm) return { ok: true };
   if (confirm.rsi_min != null && !(rsiVal >= confirm.rsi_min))
     return { ok: false, reason: `RSI ${rsiVal.toFixed(1)} < ${confirm.rsi_min}` };
   if (confirm.rsi_max != null && !(rsiVal <= confirm.rsi_max))
     return { ok: false, reason: `RSI ${rsiVal.toFixed(1)} > ${confirm.rsi_max}` };
-  if (confirm.ema_side === 'above' && !(close > ema21))
-    return { ok: false, reason: `close ${close.toFixed(decimals)} below EMA21 ${ema21.toFixed(decimals)}` };
-  if (confirm.ema_side === 'below' && !(close < ema21))
-    return { ok: false, reason: `close ${close.toFixed(decimals)} above EMA21 ${ema21.toFixed(decimals)}` };
-  if (confirm.bb_touch === 'lower' && !(close <= bb.lower))
-    return { ok: false, reason: `close not at lower BB ${bb.lower.toFixed(decimals)}` };
-  if (confirm.bb_touch === 'upper' && !(close >= bb.upper))
-    return { ok: false, reason: `close not at upper BB ${bb.upper.toFixed(decimals)}` };
+  if (confirm.channel === 'upper' && !(close >= emaHigh))
+    return { ok: false, reason: `close ${close.toFixed(decimals)} below upper channel ${emaHigh.toFixed(decimals)}` };
+  if (confirm.channel === 'lower' && !(close <= emaLow))
+    return { ok: false, reason: `close ${close.toFixed(decimals)} above lower channel ${emaLow.toFixed(decimals)}` };
   return { ok: true };
 }
 
 async function evaluateMarket(marketKey, alerts, state) {
   const cfg = MARKETS[marketKey];
   const bars = await fetchBars(cfg.yahoo);
-  if (bars.length < 30) throw new Error(`${marketKey}: not enough bars (${bars.length})`);
+  if (bars.length < EMA_LEN + 5) throw new Error(`${marketKey}: not enough bars (${bars.length})`);
 
   const idx = latestCompletedBarIndex(bars);
   if (idx < 1) return;
@@ -173,22 +138,25 @@ async function evaluateMarket(marketKey, alerts, state) {
   state.lastClose[marketKey] = bar.t;
 
   const closes = bars.slice(0, idx + 1).map(b => b.close);
-  const rsiArr = rsi(closes, 14);
-  const emaArr = ema(closes, 21);
-  const bb = bollinger(closes, 20, 2);
+  const highs  = bars.slice(0, idx + 1).map(b => b.high);
+  const lows   = bars.slice(0, idx + 1).map(b => b.low);
+
+  const rsiArr     = rsi(closes, RSI_LEN);
+  const emaHighArr = ema(highs,  EMA_LEN);
+  const emaLowArr  = ema(lows,   EMA_LEN);
 
   const snapshot = {
-    close: bar.close,
-    rsi:   rsiArr[idx],
-    ema21: emaArr[idx],
-    bb:    { upper: bb.upper[idx], mid: bb.mid[idx], lower: bb.lower[idx] },
+    close:    bar.close,
+    rsi:      rsiArr[idx],
+    emaHigh:  emaHighArr[idx],
+    emaLow:   emaLowArr[idx],
   };
 
   const swingBars = bars.slice(Math.max(0, idx - SWING_LOOKBACK), idx);
   const swingHigh = Math.max(...swingBars.map(b => b.high));
   const swingLow  = Math.min(...swingBars.map(b => b.low));
 
-  console.log(`[${new Date().toISOString()}] ${marketKey} new 4H close=${snapshot.close} RSI=${snapshot.rsi.toFixed(1)} EMA21=${snapshot.ema21.toFixed(cfg.decimals)} swingH=${swingHigh} swingL=${swingLow}`);
+  console.log(`[${new Date().toISOString()}] ${marketKey} new 4H close=${snapshot.close} RSI=${snapshot.rsi.toFixed(1)} emaHigh=${snapshot.emaHigh.toFixed(cfg.decimals)} emaLow=${snapshot.emaLow.toFixed(cfg.decimals)} swingH=${swingHigh} swingL=${swingLow}`);
 
   for (const alert of alerts) {
     if (state.fired?.[alert.id]) continue;
@@ -206,8 +174,7 @@ async function evaluateMarket(marketKey, alerts, state) {
     let invalidated = null;
 
     if (side !== 'warning') {
-      const confirm = side === 'long' ? cfg.long_confirm : cfg.short_confirm;
-      const { ok, reason } = checkConfirm(confirm, snapshot, cfg.decimals);
+      const { ok, reason } = checkConfirm(alert.confirm, snapshot, cfg.decimals);
       if (!ok) {
         console.log(`[${new Date().toISOString()}] ${marketKey} ${alert.id}: cross but NOT confirmed — ${reason}`);
         continue;
@@ -220,8 +187,7 @@ async function evaluateMarket(marketKey, alerts, state) {
       }
       confirmNote = [
         `RSI(14): ${snapshot.rsi.toFixed(1)}`,
-        `EMA(21): ${snapshot.ema21.toFixed(cfg.decimals)}`,
-        `BB: ${snapshot.bb.lower.toFixed(cfg.decimals)} / ${snapshot.bb.mid.toFixed(cfg.decimals)} / ${snapshot.bb.upper.toFixed(cfg.decimals)}`,
+        `Channel: ${snapshot.emaLow.toFixed(cfg.decimals)} — ${snapshot.emaHigh.toFixed(cfg.decimals)}`,
       ].join(' • ');
     }
 
@@ -238,10 +204,9 @@ async function evaluateMarket(marketKey, alerts, state) {
       `*${alert.label}*`,
       `4H close *${bar.close.toFixed(cfg.decimals)}* crossed *${crossDir === 'up' ? '↑' : '↓'}* ${Number(alert.level).toFixed(cfg.decimals)}`,
       ``,
-      confirmLine,
-      confirmLine ? '' : null,
+      confirmLine || null,
       alert.note || '',
-    ].filter(l => l !== null && l !== '' ? true : l === '').join('\n');
+    ].filter(l => l !== null).join('\n');
 
     console.log(`[${new Date().toISOString()}] FIRED: ${marketKey} ${alert.id}`);
     await sendTelegram(msg);
@@ -251,7 +216,8 @@ async function evaluateMarket(marketKey, alerts, state) {
       firedAt: new Date().toISOString(),
       close: bar.close,
       rsi: snapshot.rsi,
-      ema21: snapshot.ema21,
+      emaHigh: snapshot.emaHigh,
+      emaLow: snapshot.emaLow,
     };
   }
 }
@@ -323,7 +289,7 @@ async function main() {
 
   await sendTelegram(
     `✅ *Smart notifier online.*\n` +
-    `4H close-based, with RSI/EMA/BB confirmation + swing-break invalidation.\n` +
+    `4H close-based, EMA(20) channel + RSI(14) confirmation + swing-break invalidation.\n` +
     `Markets: ${Object.keys(MARKETS).join(', ')}\n` +
     `Active alerts: ${totalAlerts}`
   );
