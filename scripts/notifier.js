@@ -1,23 +1,22 @@
 #!/usr/bin/env node
 /**
- * Standalone Telegram alert notifier for BTC / Gold / GBPUSD.
+ * Smart Telegram alert notifier — 4H close with indicator & structure confirmation.
  *
- * Polls free public price APIs (Yahoo Finance) every POLL_SECONDS, compares
- * to alert levels in notifier_alerts.json, and sends a Telegram message when
- * price crosses any level.
+ * Fires when ALL of:
+ *   1. A new 4H bar has closed since last poll,
+ *   2. The 4H close crossed the alert's level in the configured direction,
+ *   3. Per-market indicator confirmation matches the trade side (long/short),
+ *   4. Prior swing high (shorts) / swing low (longs) has not been broken.
  *
- * Setup:
- *   1. Create a Telegram bot via @BotFather → save the bot token
- *   2. Send /start to your bot, then visit
- *      https://api.telegram.org/bot<TOKEN>/getUpdates → save the chat.id
- *   3. Export env vars:
- *        export TG_BOT_TOKEN="123:ABC..."
- *        export TG_CHAT_ID="12345678"
- *   4. Edit notifier_alerts.json to set your levels
- *   5. Run: node scripts/notifier.js
+ * Side "warning" bypasses checks (2) fires only, (3) and (4) are skipped — used for
+ * invalidation-style pings.
  *
- * Price sources (all public, no auth):
- *   - Yahoo Finance chart endpoint — works for BTC-USD, GBPUSD=X, GC=F (gold futures)
+ * Data: Yahoo Finance chart API (public, no auth). Indicators computed client-side.
+ *
+ * Caveat: state (lastClose, fired) is file-based and resets on DO App Platform
+ * redeploy. On boot, lastClose is seeded from the current latest completed bar so
+ * we don't retroactively re-fire old crosses. `fired` may re-fire an alert once
+ * across a redeploy if its conditions happen to cross again.
  */
 
 import fs from 'node:fs';
@@ -29,34 +28,232 @@ const ALERTS_FILE = path.join(__dirname, 'notifier_alerts.json');
 const STATE_FILE  = path.join(__dirname, 'notifier_state.json');
 
 const POLL_SECONDS = 60;
+const TF = '4h';
+const TF_MS = 4 * 60 * 60 * 1000;
+const SWING_LOOKBACK = 10;
 
 const BOT_TOKEN = process.env.TG_BOT_TOKEN;
 const CHAT_ID   = process.env.TG_CHAT_ID;
 
 if (!BOT_TOKEN || !CHAT_ID) {
   console.error('ERROR: set TG_BOT_TOKEN and TG_CHAT_ID environment variables.');
-  console.error('See header comment in this file for setup steps.');
   process.exit(1);
 }
 
-// Yahoo Finance symbol mapping for our 3 markets
-const SYMBOLS = {
-  BTC:    { yahoo: 'BTC-USD',  display: 'BTC/USD',    decimals: 0 },
-  GOLD:   { yahoo: 'GC=F',     display: 'Gold (XAU)', decimals: 2 },
-  GBPUSD: { yahoo: 'GBPUSD=X', display: 'GBP/USD',    decimals: 5 },
-  EURUSD: { yahoo: 'EURUSD=X', display: 'EUR/USD',    decimals: 5 },
+const MARKETS = {
+  BTC: {
+    yahoo: 'BTC-USD', display: 'BTC/USD', decimals: 0,
+    long_confirm:  { rsi_min: 50, ema_side: 'above' },
+    short_confirm: { rsi_max: 50, ema_side: 'below' },
+  },
+  GOLD: {
+    yahoo: 'GC=F', display: 'Gold (XAU)', decimals: 2,
+    long_confirm:  { rsi_min: 45, bb_touch: 'lower' },
+    short_confirm: { rsi_max: 55, bb_touch: 'upper' },
+  },
+  GBPUSD: {
+    yahoo: 'GBPUSD=X', display: 'GBP/USD', decimals: 5,
+    long_confirm:  { rsi_min: 50, ema_side: 'above' },
+    short_confirm: { rsi_max: 50, ema_side: 'below' },
+  },
+  EURUSD: {
+    yahoo: 'EURUSD=X', display: 'EUR/USD', decimals: 5,
+    long_confirm:  { rsi_min: 50, ema_side: 'above' },
+    short_confirm: { rsi_max: 50, ema_side: 'below' },
+  },
 };
 
-async function fetchYahooPrice(yahooSymbol) {
-  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(yahooSymbol)}?interval=1m&range=1d`;
-  const r = await fetch(url, {
-    headers: { 'User-Agent': 'Mozilla/5.0 (compatible; alert-notifier/1.0)' },
-  });
+async function fetchBars(yahooSymbol) {
+  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(yahooSymbol)}?interval=${TF}&range=60d`;
+  const r = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0 (compatible; alert-notifier/2.0)' } });
   if (!r.ok) throw new Error(`Yahoo ${yahooSymbol} HTTP ${r.status}`);
-  const data = await r.json();
-  const meta = data?.chart?.result?.[0]?.meta;
-  if (!meta) throw new Error(`Yahoo ${yahooSymbol} no meta`);
-  return Number(meta.regularMarketPrice);
+  const d = await r.json();
+  const result = d?.chart?.result?.[0];
+  if (!result) throw new Error(`Yahoo ${yahooSymbol} no result`);
+  const ts = result.timestamp || [];
+  const q = result.indicators.quote[0];
+  return ts
+    .map((t, i) => ({
+      t: t * 1000,
+      open:  q.open[i],
+      high:  q.high[i],
+      low:   q.low[i],
+      close: q.close[i],
+    }))
+    .filter(b => b.close != null && b.high != null && b.low != null);
+}
+
+function ema(values, n) {
+  if (values.length < n) return [];
+  const k = 2 / (n + 1);
+  const out = new Array(values.length);
+  let e = values.slice(0, n).reduce((a, b) => a + b, 0) / n;
+  out[n - 1] = e;
+  for (let i = n; i < values.length; i++) {
+    e = (values[i] - e) * k + e;
+    out[i] = e;
+  }
+  return out;
+}
+
+function rsi(closes, n) {
+  if (closes.length < n + 1) return [];
+  const out = new Array(closes.length);
+  let gainSum = 0, lossSum = 0;
+  for (let i = 1; i <= n; i++) {
+    const d = closes[i] - closes[i - 1];
+    if (d > 0) gainSum += d; else lossSum += -d;
+  }
+  let avgGain = gainSum / n;
+  let avgLoss = lossSum / n;
+  out[n] = avgLoss === 0 ? 100 : 100 - 100 / (1 + avgGain / avgLoss);
+  for (let i = n + 1; i < closes.length; i++) {
+    const d = closes[i] - closes[i - 1];
+    const gain = d > 0 ? d : 0;
+    const loss = d < 0 ? -d : 0;
+    avgGain = (avgGain * (n - 1) + gain) / n;
+    avgLoss = (avgLoss * (n - 1) + loss) / n;
+    out[i] = avgLoss === 0 ? 100 : 100 - 100 / (1 + avgGain / avgLoss);
+  }
+  return out;
+}
+
+function bollinger(closes, n, mult) {
+  const mid = new Array(closes.length);
+  const upper = new Array(closes.length);
+  const lower = new Array(closes.length);
+  for (let i = n - 1; i < closes.length; i++) {
+    const window = closes.slice(i - n + 1, i + 1);
+    const m = window.reduce((a, b) => a + b, 0) / n;
+    const variance = window.reduce((a, b) => a + (b - m) ** 2, 0) / n;
+    const sd = Math.sqrt(variance);
+    mid[i] = m;
+    upper[i] = m + mult * sd;
+    lower[i] = m - mult * sd;
+  }
+  return { mid, upper, lower };
+}
+
+function latestCompletedBarIndex(bars) {
+  const now = Date.now();
+  for (let i = bars.length - 1; i >= 0; i--) {
+    if (now > bars[i].t + TF_MS) return i;
+  }
+  return -1;
+}
+
+function checkConfirm(confirm, { rsi: rsiVal, close, ema21, bb }, decimals) {
+  if (confirm.rsi_min != null && !(rsiVal >= confirm.rsi_min))
+    return { ok: false, reason: `RSI ${rsiVal.toFixed(1)} < ${confirm.rsi_min}` };
+  if (confirm.rsi_max != null && !(rsiVal <= confirm.rsi_max))
+    return { ok: false, reason: `RSI ${rsiVal.toFixed(1)} > ${confirm.rsi_max}` };
+  if (confirm.ema_side === 'above' && !(close > ema21))
+    return { ok: false, reason: `close ${close.toFixed(decimals)} below EMA21 ${ema21.toFixed(decimals)}` };
+  if (confirm.ema_side === 'below' && !(close < ema21))
+    return { ok: false, reason: `close ${close.toFixed(decimals)} above EMA21 ${ema21.toFixed(decimals)}` };
+  if (confirm.bb_touch === 'lower' && !(close <= bb.lower))
+    return { ok: false, reason: `close not at lower BB ${bb.lower.toFixed(decimals)}` };
+  if (confirm.bb_touch === 'upper' && !(close >= bb.upper))
+    return { ok: false, reason: `close not at upper BB ${bb.upper.toFixed(decimals)}` };
+  return { ok: true };
+}
+
+async function evaluateMarket(marketKey, alerts, state) {
+  const cfg = MARKETS[marketKey];
+  const bars = await fetchBars(cfg.yahoo);
+  if (bars.length < 30) throw new Error(`${marketKey}: not enough bars (${bars.length})`);
+
+  const idx = latestCompletedBarIndex(bars);
+  if (idx < 1) return;
+  const bar = bars[idx];
+  const prev = bars[idx - 1];
+
+  state.lastClose = state.lastClose || {};
+  if (state.lastClose[marketKey] === bar.t) return;
+  state.lastClose[marketKey] = bar.t;
+
+  const closes = bars.slice(0, idx + 1).map(b => b.close);
+  const rsiArr = rsi(closes, 14);
+  const emaArr = ema(closes, 21);
+  const bb = bollinger(closes, 20, 2);
+
+  const snapshot = {
+    close: bar.close,
+    rsi:   rsiArr[idx],
+    ema21: emaArr[idx],
+    bb:    { upper: bb.upper[idx], mid: bb.mid[idx], lower: bb.lower[idx] },
+  };
+
+  const swingBars = bars.slice(Math.max(0, idx - SWING_LOOKBACK), idx);
+  const swingHigh = Math.max(...swingBars.map(b => b.high));
+  const swingLow  = Math.min(...swingBars.map(b => b.low));
+
+  console.log(`[${new Date().toISOString()}] ${marketKey} new 4H close=${snapshot.close} RSI=${snapshot.rsi.toFixed(1)} EMA21=${snapshot.ema21.toFixed(cfg.decimals)} swingH=${swingHigh} swingL=${swingLow}`);
+
+  for (const alert of alerts) {
+    if (state.fired?.[alert.id]) continue;
+
+    const crossedUp   = prev.close <  alert.level && bar.close >= alert.level;
+    const crossedDown = prev.close >  alert.level && bar.close <= alert.level;
+    let crossDir = null;
+    if (alert.direction === 'up'   && crossedUp)   crossDir = 'up';
+    if (alert.direction === 'down' && crossedDown) crossDir = 'down';
+    if (!crossDir) continue;
+
+    const side = alert.side || (alert.direction === 'down' ? 'long' : 'short');
+
+    let confirmNote = '';
+    let invalidated = null;
+
+    if (side !== 'warning') {
+      const confirm = side === 'long' ? cfg.long_confirm : cfg.short_confirm;
+      const { ok, reason } = checkConfirm(confirm, snapshot, cfg.decimals);
+      if (!ok) {
+        console.log(`[${new Date().toISOString()}] ${marketKey} ${alert.id}: cross but NOT confirmed — ${reason}`);
+        continue;
+      }
+      if (side === 'long'  && bar.close < swingLow)  invalidated = `close ${bar.close} < swing low ${swingLow}`;
+      if (side === 'short' && bar.close > swingHigh) invalidated = `close ${bar.close} > swing high ${swingHigh}`;
+      if (invalidated) {
+        console.log(`[${new Date().toISOString()}] ${marketKey} ${alert.id}: cross but structure invalidated — ${invalidated}`);
+        continue;
+      }
+      confirmNote = [
+        `RSI(14): ${snapshot.rsi.toFixed(1)}`,
+        `EMA(21): ${snapshot.ema21.toFixed(cfg.decimals)}`,
+        `BB: ${snapshot.bb.lower.toFixed(cfg.decimals)} / ${snapshot.bb.mid.toFixed(cfg.decimals)} / ${snapshot.bb.upper.toFixed(cfg.decimals)}`,
+      ].join(' • ');
+    }
+
+    const header = side === 'warning'
+      ? `⚠️ *${cfg.display} — WARNING*`
+      : `🔔 *${cfg.display} — ${side.toUpperCase()}*`;
+    const confirmLine = side === 'warning'
+      ? ''
+      : `✅ Confirmed: ${confirmNote}`;
+
+    const msg = [
+      header,
+      ``,
+      `*${alert.label}*`,
+      `4H close *${bar.close.toFixed(cfg.decimals)}* crossed *${crossDir === 'up' ? '↑' : '↓'}* ${Number(alert.level).toFixed(cfg.decimals)}`,
+      ``,
+      confirmLine,
+      confirmLine ? '' : null,
+      alert.note || '',
+    ].filter(l => l !== null && l !== '' ? true : l === '').join('\n');
+
+    console.log(`[${new Date().toISOString()}] FIRED: ${marketKey} ${alert.id}`);
+    await sendTelegram(msg);
+
+    state.fired = state.fired || {};
+    state.fired[alert.id] = {
+      firedAt: new Date().toISOString(),
+      close: bar.close,
+      rsi: snapshot.rsi,
+      ema21: snapshot.ema21,
+    };
+  }
 }
 
 async function sendTelegram(text) {
@@ -64,12 +261,7 @@ async function sendTelegram(text) {
   const r = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      chat_id: CHAT_ID,
-      text,
-      parse_mode: 'Markdown',
-      disable_web_page_preview: true,
-    }),
+    body: JSON.stringify({ chat_id: CHAT_ID, text, parse_mode: 'Markdown', disable_web_page_preview: true }),
   });
   if (!r.ok) {
     const body = await r.text();
@@ -86,113 +278,59 @@ function saveJson(file, data) {
   fs.writeFileSync(file, JSON.stringify(data, null, 2));
 }
 
-function fmtPrice(price, decimals) {
-  return price.toFixed(decimals);
-}
-
-// Crossing detection: detect when price transitions across the level in
-// either direction between two consecutive polls. Only fires on actual cross,
-// not on continuous price on one side.
-function crossed(prevPrice, currPrice, level) {
-  if (prevPrice == null) return false;
-  if (prevPrice <= level && currPrice > level) return 'up';
-  if (prevPrice >= level && currPrice < level) return 'down';
-  return false;
-}
-
-async function pollOnce(alerts, state) {
-  for (const market of Object.keys(SYMBOLS)) {
-    const cfg = SYMBOLS[market];
-    const marketAlerts = alerts[market] || [];
-    if (marketAlerts.length === 0) continue;
-
-    let currPrice;
+async function seedLastCloseFromCurrentBars(state) {
+  state.lastClose = state.lastClose || {};
+  for (const market of Object.keys(MARKETS)) {
     try {
-      currPrice = await fetchYahooPrice(cfg.yahoo);
+      const bars = await fetchBars(MARKETS[market].yahoo);
+      const idx = latestCompletedBarIndex(bars);
+      if (idx >= 0 && state.lastClose[market] == null) {
+        state.lastClose[market] = bars[idx].t;
+      }
     } catch (err) {
-      console.error(`[${new Date().toISOString()}] ${market} fetch failed:`, err.message);
-      continue;
+      console.error(`seed ${market}:`, err.message);
     }
+  }
+}
 
-    const prevPrice = state.lastPrice?.[market];
-    state.lastPrice = state.lastPrice || {};
-    state.lastPrice[market] = currPrice;
-
-    for (const alert of marketAlerts) {
-      if (state.fired?.[alert.id]) continue; // already fired this alert
-
-      const direction = crossed(prevPrice, currPrice, alert.level);
-      if (!direction) continue;
-
-      // Directional filter: alert.direction is 'up', 'down', or 'any'
-      if (alert.direction && alert.direction !== 'any' && alert.direction !== direction) continue;
-
-      // Fire the alert
-      const msg = [
-        `🔔 *${cfg.display} alert*`,
-        ``,
-        `*${alert.label}*`,
-        `Price crossed *${direction === 'up' ? '↑' : '↓'}* ${fmtPrice(alert.level, cfg.decimals)}`,
-        `Current: *${fmtPrice(currPrice, cfg.decimals)}*`,
-        ``,
-        alert.note || '',
-      ].filter(Boolean).join('\n');
-
-      console.log(`[${new Date().toISOString()}] FIRED: ${market} ${alert.id} — ${alert.label}`);
-      await sendTelegram(msg);
-
-      state.fired = state.fired || {};
-      state.fired[alert.id] = {
-        firedAt: new Date().toISOString(),
-        price: currPrice,
-        direction,
-      };
+async function pollOnce(alertsByMarket, state) {
+  for (const market of Object.keys(MARKETS)) {
+    const alerts = alertsByMarket[market] || [];
+    if (alerts.length === 0) continue;
+    try {
+      await evaluateMarket(market, alerts, state);
+    } catch (err) {
+      console.error(`[${new Date().toISOString()}] ${market} poll error:`, err.message);
     }
   }
   saveJson(STATE_FILE, state);
 }
 
 async function main() {
-  // Write example alerts file if missing
   if (!fs.existsSync(ALERTS_FILE)) {
-    const example = {
-      BTC: [
-        { id: 'btc_long_pullback', level: 73780, direction: 'down',
-          label: 'BTC LONG — pullback entry',
-          note: 'Entry 73780, stop 73400, T1 74500, T2 75000' },
-      ],
-      GOLD: [
-        { id: 'gold_long_pullback', level: 4790, direction: 'down',
-          label: 'GOLD LONG — pullback entry',
-          note: 'Entry 4790, stop 4770, T1 4810, T2 4830' },
-      ],
-      GBPUSD: [
-        { id: 'gbpusd_long_pullback', level: 1.35646, direction: 'down',
-          label: 'GBPUSD LONG — pullback entry',
-          note: 'Entry 1.35646, stop 1.35400, T1 1.36000, T2 1.36300' },
-      ],
-    };
-    saveJson(ALERTS_FILE, example);
-    console.log(`Wrote example alerts to ${ALERTS_FILE}. Edit and restart.`);
+    console.error(`Missing ${ALERTS_FILE}`);
+    process.exit(1);
   }
+  const alertsByMarket = loadJson(ALERTS_FILE, {});
+  const state = loadJson(STATE_FILE, { lastClose: {}, fired: {} });
 
-  const alerts = loadJson(ALERTS_FILE, {});
-  const state  = loadJson(STATE_FILE, { lastPrice: {}, fired: {} });
+  await seedLastCloseFromCurrentBars(state);
+  saveJson(STATE_FILE, state);
 
-  console.log(`[${new Date().toISOString()}] Notifier started. Polling every ${POLL_SECONDS}s.`);
-  console.log(`Markets: ${Object.keys(SYMBOLS).join(', ')}`);
-  console.log(`Active alerts: ${Object.values(alerts).flat().filter(a => !state.fired?.[a.id]).length}`);
+  const totalAlerts = Object.values(alertsByMarket).flat().filter(a => !state.fired?.[a.id]).length;
+  console.log(`[${new Date().toISOString()}] Smart notifier started. Evaluating on 4H close, poll ${POLL_SECONDS}s.`);
+  console.log(`Markets: ${Object.keys(MARKETS).join(', ')} | Active alerts: ${totalAlerts}`);
 
-  // Startup ping so you know Telegram works
-  await sendTelegram(`✅ Alert notifier online. Watching BTC / Gold / GBPUSD every ${POLL_SECONDS}s.`);
+  await sendTelegram(
+    `✅ *Smart notifier online.*\n` +
+    `4H close-based, with RSI/EMA/BB confirmation + swing-break invalidation.\n` +
+    `Markets: ${Object.keys(MARKETS).join(', ')}\n` +
+    `Active alerts: ${totalAlerts}`
+  );
 
-  // Polling loop
   while (true) {
-    try {
-      await pollOnce(alerts, state);
-    } catch (err) {
-      console.error(`[${new Date().toISOString()}] poll error:`, err);
-    }
+    try { await pollOnce(alertsByMarket, state); }
+    catch (err) { console.error(`poll error:`, err); }
     await new Promise(r => setTimeout(r, POLL_SECONDS * 1000));
   }
 }

@@ -4,6 +4,7 @@
       "id": "btc_long_pullback_74500",
       "level": 74500,
       "direction": "down",
+      "side": "long",
       "label": "BTC LONG — shallow pullback to 74500",
       "note": "Entry 74500, stop 74100, T1 75500, T2 76200. 4h uptrend intact. R/R 1:2.5"
     },
@@ -11,6 +12,7 @@
       "id": "btc_trend_break_73687",
       "level": 73687,
       "direction": "down",
+      "side": "warning",
       "label": "BTC INVALIDATION — trend break below EMA low 73687",
       "note": "If price closes below 73687, long thesis dies. Stand down, wait for new structure."
     }
@@ -20,6 +22,7 @@
       "id": "gold_short_bounce_4810",
       "level": 4810,
       "direction": "up",
+      "side": "short",
       "label": "GOLD SHORT — bounce to resistance 4810",
       "note": "Entry 4810 on bounce, stop 4835, T1 4775, T2 4740. 4h downtrend confirmed. R/R 1:2.8"
     },
@@ -27,6 +30,7 @@
       "id": "gold_breakdown_4772",
       "level": 4772,
       "direction": "down",
+      "side": "short",
       "label": "GOLD BREAKDOWN — below recent low 4772",
       "note": "If 4h closes below 4772, trend continues down. Target 4740/4700."
     }
@@ -36,6 +40,7 @@
       "id": "gbpusd_short_bounce_13540",
       "level": 1.354,
       "direction": "up",
+      "side": "short",
       "label": "GBPUSD SHORT — bounce to resistance 1.3540",
       "note": "Entry 1.3540 on bounce, stop 1.3550, T1 1.3517, T2 1.3500. 4h downtrend. R/R 1:2.3"
     },
@@ -43,6 +48,7 @@
       "id": "gbpusd_breakdown_13516",
       "level": 1.3516,
       "direction": "down",
+      "side": "short",
       "label": "GBPUSD BREAKDOWN — below recent low 1.3516",
       "note": "If 4h closes below 1.3516, trend continues. Target 1.3500/1.3480."
     }
@@ -52,6 +58,7 @@
       "id": "eurusd_short_bounce_11810",
       "level": 1.1810,
       "direction": "up",
+      "side": "short",
       "label": "EURUSD SHORT — bounce to resistance 1.1810",
       "note": "Entry 1.1810 on bounce, stop 1.1830, T1 1.1785, T2 1.1767. Mirror of GBPUSD short thesis. R/R ~1:2"
     },
@@ -59,6 +66,7 @@
       "id": "eurusd_breakdown_11767",
       "level": 1.1767,
       "direction": "down",
+      "side": "short",
       "label": "EURUSD BREAKDOWN — below recent low 1.1767",
       "note": "If 4h closes below 1.1767, trend continues. Target 1.1750/1.1720."
     }
