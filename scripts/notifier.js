@@ -45,6 +45,8 @@ const MARKETS = {
   GOLD:   { yahoo: 'GC=F',     display: 'Gold (XAU)', decimals: 2 },
   GBPUSD: { yahoo: 'GBPUSD=X', display: 'GBP/USD',    decimals: 5 },
   EURUSD: { yahoo: 'EURUSD=X', display: 'EUR/USD',    decimals: 5 },
+  USDJPY: { yahoo: 'JPY=X',    display: 'USD/JPY',    decimals: 3 },
+  AUDUSD: { yahoo: 'AUDUSD=X', display: 'AUD/USD',    decimals: 5 },
 };
 
 async function fetchBars(yahooSymbol) {
