@@ -158,14 +158,33 @@ async function evaluateMarket(marketKey, alerts, state) {
 
   console.log(`[${new Date().toISOString()}] ${marketKey} new 4H close=${snapshot.close} RSI=${snapshot.rsi.toFixed(1)} emaHigh=${snapshot.emaHigh.toFixed(cfg.decimals)} emaLow=${snapshot.emaLow.toFixed(cfg.decimals)} swingH=${swingHigh} swingL=${swingLow}`);
 
+  const prevEmaHigh = emaHighArr[idx - 1];
+  const prevEmaLow  = emaLowArr[idx - 1];
+
   for (const alert of alerts) {
     if (state.fired?.[alert.id]) continue;
 
-    const crossedUp   = prev.close <  alert.level && bar.close >= alert.level;
-    const crossedDown = prev.close >  alert.level && bar.close <= alert.level;
     let crossDir = null;
-    if (alert.direction === 'up'   && crossedUp)   crossDir = 'up';
-    if (alert.direction === 'down' && crossedDown) crossDir = 'down';
+    let crossDesc = '';
+    if (alert.trigger === 'channel_cross_up') {
+      if (prev.close < prevEmaHigh && bar.close >= snapshot.emaHigh) {
+        crossDir = 'up';
+        crossDesc = `4H close *${bar.close.toFixed(cfg.decimals)}* broke UP through upper channel *${snapshot.emaHigh.toFixed(cfg.decimals)}*`;
+      }
+    } else if (alert.trigger === 'channel_cross_down') {
+      if (prev.close > prevEmaLow && bar.close <= snapshot.emaLow) {
+        crossDir = 'down';
+        crossDesc = `4H close *${bar.close.toFixed(cfg.decimals)}* broke DOWN through lower channel *${snapshot.emaLow.toFixed(cfg.decimals)}*`;
+      }
+    } else {
+      const crossedUp   = prev.close <  alert.level && bar.close >= alert.level;
+      const crossedDown = prev.close >  alert.level && bar.close <= alert.level;
+      if (alert.direction === 'up'   && crossedUp)   crossDir = 'up';
+      if (alert.direction === 'down' && crossedDown) crossDir = 'down';
+      if (crossDir) {
+        crossDesc = `4H close *${bar.close.toFixed(cfg.decimals)}* crossed *${crossDir === 'up' ? '↑' : '↓'}* ${Number(alert.level).toFixed(cfg.decimals)}`;
+      }
+    }
     if (!crossDir) continue;
 
     const side = alert.side || (alert.direction === 'down' ? 'long' : 'short');
@@ -202,7 +221,7 @@ async function evaluateMarket(marketKey, alerts, state) {
       header,
       ``,
       `*${alert.label}*`,
-      `4H close *${bar.close.toFixed(cfg.decimals)}* crossed *${crossDir === 'up' ? '↑' : '↓'}* ${Number(alert.level).toFixed(cfg.decimals)}`,
+      crossDesc,
       ``,
       confirmLine || null,
       alert.note || '',

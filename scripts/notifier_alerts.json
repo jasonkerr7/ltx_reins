@@ -65,6 +65,22 @@
       "confirm": { "rsi_min": 55, "channel": "upper" },
       "label": "GBPUSD LONG — breakout above 1.3610 (new 30d high)",
       "note": "Entry 1.3610 on breakout, stop 1.3580, T1 1.3660, T2 1.3700. Follow the trend. R/R ~1:3"
+    },
+    {
+      "id": "gbpusd_channel_breakout_long",
+      "trigger": "channel_cross_up",
+      "side": "long",
+      "confirm": { "rsi_min": 55 },
+      "label": "GBPUSD LONG — channel breakout (dynamic trend entry)",
+      "note": "Price broke up through the green channel line with strong RSI. Entry at close, stop below emaHigh (~20-30 pips), trail stops up. This catches the START of a rally."
+    },
+    {
+      "id": "gbpusd_channel_breakdown_short",
+      "trigger": "channel_cross_down",
+      "side": "short",
+      "confirm": { "rsi_max": 45 },
+      "label": "GBPUSD SHORT — channel breakdown (dynamic trend entry)",
+      "note": "Price broke down through the red channel line with weak RSI. Entry at close, stop above emaLow (~20-30 pips), trail stops down. This catches the START of a drop."
     }
   ],
   "EURUSD": [
@@ -94,6 +110,22 @@
       "confirm": { "rsi_min": 55, "channel": "upper" },
       "label": "EURUSD LONG — breakout above 1.1840 (new 30d high)",
       "note": "Entry 1.1840 on breakout, stop 1.1815, T1 1.1880, T2 1.1920. Follow the trend. R/R ~1:3"
+    },
+    {
+      "id": "eurusd_channel_breakout_long",
+      "trigger": "channel_cross_up",
+      "side": "long",
+      "confirm": { "rsi_min": 55 },
+      "label": "EURUSD LONG — channel breakout (dynamic trend entry)",
+      "note": "Price broke up through the green channel line with strong RSI. Entry at close, stop below emaHigh (~20-30 pips), trail stops up. This catches the START of a rally."
+    },
+    {
+      "id": "eurusd_channel_breakdown_short",
+      "trigger": "channel_cross_down",
+      "side": "short",
+      "confirm": { "rsi_max": 45 },
+      "label": "EURUSD SHORT — channel breakdown (dynamic trend entry)",
+      "note": "Price broke down through the red channel line with weak RSI. Entry at close, stop above emaLow (~20-30 pips), trail stops down. This catches the START of a drop."
     }
   ]
 }
