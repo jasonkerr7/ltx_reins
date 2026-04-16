@@ -46,5 +46,21 @@
       "label": "GBPUSD BREAKDOWN — below recent low 1.3516",
       "note": "If 4h closes below 1.3516, trend continues. Target 1.3500/1.3480."
     }
+  ],
+  "EURUSD": [
+    {
+      "id": "eurusd_short_bounce_11810",
+      "level": 1.1810,
+      "direction": "up",
+      "label": "EURUSD SHORT — bounce to resistance 1.1810",
+      "note": "Entry 1.1810 on bounce, stop 1.1830, T1 1.1785, T2 1.1767. Mirror of GBPUSD short thesis. R/R ~1:2"
+    },
+    {
+      "id": "eurusd_breakdown_11767",
+      "level": 1.1767,
+      "direction": "down",
+      "label": "EURUSD BREAKDOWN — below recent low 1.1767",
+      "note": "If 4h closes below 1.1767, trend continues. Target 1.1750/1.1720."
+    }
   ]
 }

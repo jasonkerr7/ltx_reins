@@ -44,6 +44,7 @@ const SYMBOLS = {
   BTC:    { yahoo: 'BTC-USD',  display: 'BTC/USD',    decimals: 0 },
   GOLD:   { yahoo: 'GC=F',     display: 'Gold (XAU)', decimals: 2 },
   GBPUSD: { yahoo: 'GBPUSD=X', display: 'GBP/USD',    decimals: 5 },
+  EURUSD: { yahoo: 'EURUSD=X', display: 'EUR/USD',    decimals: 5 },
 };
 
 async function fetchYahooPrice(yahooSymbol) {
