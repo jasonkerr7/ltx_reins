@@ -56,6 +56,15 @@
       "confirm": { "rsi_max": 55, "channel": "lower" },
       "label": "GBPUSD BREAKDOWN — below recent low 1.3516",
       "note": "If 4h closes below 1.3516, trend continues. Target 1.3500/1.3480."
+    },
+    {
+      "id": "gbpusd_long_breakout_13610",
+      "level": 1.3610,
+      "direction": "up",
+      "side": "long",
+      "confirm": { "rsi_min": 55, "channel": "upper" },
+      "label": "GBPUSD LONG — breakout above 1.3610 (new 30d high)",
+      "note": "Entry 1.3610 on breakout, stop 1.3580, T1 1.3660, T2 1.3700. Follow the trend. R/R ~1:3"
     }
   ],
   "EURUSD": [
@@ -76,6 +85,15 @@
       "confirm": { "rsi_max": 55, "channel": "lower" },
       "label": "EURUSD BREAKDOWN — below recent low 1.1767",
       "note": "If 4h closes below 1.1767, trend continues. Target 1.1750/1.1720."
+    },
+    {
+      "id": "eurusd_long_breakout_11840",
+      "level": 1.1840,
+      "direction": "up",
+      "side": "long",
+      "confirm": { "rsi_min": 55, "channel": "upper" },
+      "label": "EURUSD LONG — breakout above 1.1840 (new 30d high)",
+      "note": "Entry 1.1840 on breakout, stop 1.1815, T1 1.1880, T2 1.1920. Follow the trend. R/R ~1:3"
     }
   ]
 }
